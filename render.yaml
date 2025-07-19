@@ -2,7 +2,7 @@ services:
   - type: web
     name: semantic-book-recommender
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python ingest.py
     startCommand: streamlit run app.py --server.port $PORT
     envVars:
       - key: OPENAI_API_KEY
