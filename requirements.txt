@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+python-dotenv
+langchain
+langchain-community
+langchain-openai
+langchain-chroma
+fastapi
+chromadb
+uvicorn
