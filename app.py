@@ -33,6 +33,7 @@ db_books = Chroma(
 )
 
 print(f"Chroma DB loaded from: {PERSIST_DIRECTORY}")
+print("Collection count:", db_books._collection.count())
 
 
 # --- Request Body Schema ---
