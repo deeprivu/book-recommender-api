@@ -26,6 +26,12 @@ app.add_middleware(
 # --- Load Chroma DB and Book Dataset ---
 PERSIST_DIRECTORY = os.path.join(os.getcwd(), "chroma_db")
 books = pd.read_csv("books_with_emotions.csv")  # CSV must be in repo
+books["large_thumbnail"] = books["thumbnail"] + "&fife=w800"
+books["large_thumbnail"] = np.where(
+    books["large_thumbnail"].isna(),
+    "C:\\Users\\palde\\cover-not-found.jpg",
+    books["large_thumbnail"],
+)
 print(f"Books dataset loaded with {len(books)} entries.")
 
 # Load the Chroma DB
