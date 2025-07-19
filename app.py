@@ -106,3 +106,9 @@ def recommend_books(req: RecommendationRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ✅ Add this route to fix 404 on "/"
+@app.get("/")
+def root():
+    return {"message": "📚 Book Recommender API is running!"}
