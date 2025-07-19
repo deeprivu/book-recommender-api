@@ -1,125 +1,241 @@
 import os
+import re
 import pandas as pd
+import numpy as np
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
+# LangChain (older style imports)
 from langchain.vectorstores import Chroma
 from langchain.embeddings import OpenAIEmbeddings
-import numpy as np
+# If you migrate to the new modular layout later:
+# from langchain_community.vectorstores import Chroma
+# from langchain_community.embeddings import OpenAIEmbeddings
 
-# Load environment variables (e.g., for OpenAI API key)
+
+# ------------------------------------------------------------------
+# Environment & Config
+# ------------------------------------------------------------------
 load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("⚠️  WARNING: OPENAI_API_KEY not set. Embeddings will fail if invoked.")
 
-# --- Setup FastAPI ---
-app = FastAPI()
+PERSIST_DIRECTORY = os.path.join(os.getcwd(), "chroma_db")
+BOOKS_CSV = "books_with_emotions.csv"
+FALLBACK_THUMB = "./cover-not-found.jpg"
 
-# Allow frontend (e.g., Wix) to access API
+TOP_K_INITIAL = 50
+TOP_K_FINAL = 16
+
+# Tone → column mapping
+TONE_COLUMN_MAP = {
+    "Happy": "joy",
+    "Surprising": "surprise",
+    "Angry": "anger",
+    "Suspenseful": "fear",
+    "Sad": "sadness"
+}
+
+# ------------------------------------------------------------------
+# FastAPI App
+# ------------------------------------------------------------------
+app = FastAPI(title="Semantic Book Recommender API", version="1.0.0")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can restrict this to your frontend URL
+    allow_origins=["*"],          # Narrow this in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Load Chroma DB and Book Dataset ---
-PERSIST_DIRECTORY = os.path.join(os.getcwd(), "chroma_db")
-books = pd.read_csv("books_with_emotions.csv")  # CSV must be in repo
-books["large_thumbnail"] = books["thumbnail"] + "&fife=w800"
-books["large_thumbnail"] = np.where(
-    books["large_thumbnail"].isna(),
-    "cover-not-found.jpg",
-    books["large_thumbnail"],
-)
-print(f"Books dataset loaded with {len(books)} entries.")
+# ------------------------------------------------------------------
+# Data Loading
+# ------------------------------------------------------------------
+if not os.path.exists(BOOKS_CSV):
+    raise FileNotFoundError(f"Books dataset not found: {BOOKS_CSV}")
 
-# Load the Chroma DB
+books = pd.read_csv(BOOKS_CSV)
+print(f"✅ Books dataset loaded with {len(books)} entries.")
+
+# Create large thumbnail column safely
+books["thumbnail"] = books["thumbnail"].fillna("")
+books["large_thumbnail"] = np.where(
+    books["thumbnail"] == "",
+    FALLBACK_THUMB,
+    books["thumbnail"] + "&fife=w800"
+)
+
+# Normalize isbn13 column as string
+if "isbn13" not in books.columns:
+    raise ValueError("Dataset must contain 'isbn13' column.")
+books["isbn13"] = books["isbn13"].astype(str).str.strip()
+
+# ------------------------------------------------------------------
+# Chroma Vector Store
+# ------------------------------------------------------------------
+if not os.path.exists(PERSIST_DIRECTORY):
+    print(f"⚠️  Chroma directory '{PERSIST_DIRECTORY}' not found. "
+          f"Ensure you have ingested before querying.")
 db_books = Chroma(
     persist_directory=PERSIST_DIRECTORY,
     embedding_function=OpenAIEmbeddings()
 )
 
-print(f"Chroma DB loaded from: {PERSIST_DIRECTORY}")
-print("Collection count:", db_books._collection.count())
+try:
+    collection_count = db_books._collection.count()
+except Exception:
+    collection_count = "UNKNOWN"
+
+print(f"🗄  Chroma DB loaded from: {PERSIST_DIRECTORY}")
+print(f"📦 Collection count: {collection_count}")
+
+if isinstance(collection_count, int) and collection_count == 0:
+    print("⚠️  Vector store is empty; all queries will return zero results.")
 
 
-# --- Request Body Schema ---
+# ------------------------------------------------------------------
+# Request / Response Models
+# ------------------------------------------------------------------
 class RecommendationRequest(BaseModel):
     query: str
-    category: str = "All"
-    tone: str = None
+    category: str | None = None
+    tone: str | None = None
 
 
-# --- Recommendation Logic ---
+# ------------------------------------------------------------------
+# Helper Functions
+# ------------------------------------------------------------------
+ISBN_REGEX = re.compile(r"(97[89][0-9]{10})")
+
+def extract_isbn(raw_page_content: str) -> str | None:
+    """
+    Extract a 13-digit ISBN (starting with 978 or 979) from a Chroma document's page_content.
+    Returns the first match or None.
+    """
+    if not raw_page_content:
+        return None
+    m = ISBN_REGEX.search(raw_page_content)
+    return m.group(1) if m else None
+
+
+def truncate_text(text: str, max_words: int = 30) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words]) + "..."
+
+
+def format_authors(authors_raw: str) -> str:
+    if not authors_raw:
+        return ""
+    parts = [a.strip() for a in authors_raw.split(";") if a.strip()]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    if len(parts) > 2:
+        return f"{', '.join(parts[:-1])}, and {parts[-1]}"
+    return parts[0] if parts else ""
+
+
+# ------------------------------------------------------------------
+# Core Retrieval
+# ------------------------------------------------------------------
 def retrieve_semantic_recommendations(
         query: str,
-        category: str = None,
-        tone: str = None,
-        initial_top_k: int = 50,
-        final_top_k: int = 16,
+        category: str | None = None,
+        tone: str | None = None,
+        initial_top_k: int = TOP_K_INITIAL,
+        final_top_k: int = TOP_K_FINAL,
 ) -> pd.DataFrame:
 
-    recs = db_books.similarity_search(query, k=initial_top_k)
-    books_list = [int(rec.page_content.strip('"').split()[0]) for rec in recs]
-    book_recs = books[books["isbn13"].isin(books_list)].head(initial_top_k)
+    if not query or not query.strip():
+        return pd.DataFrame()
 
+    try:
+        recs = db_books.similarity_search(query, k=initial_top_k)
+    except Exception as e:
+        print(f"❌ similarity_search error: {e}")
+        return pd.DataFrame()
+
+    if not recs:
+        print("ℹ️  No vector matches returned.")
+        return pd.DataFrame()
+
+    # Extract clean ISBNs from page_content
+    isbn_candidates = []
+    for r in recs:
+        isbn = extract_isbn(r.page_content)
+        if isbn:
+            isbn_candidates.append(isbn)
+
+    if not isbn_candidates:
+        print("ℹ️  No ISBNs extracted from vector results.")
+        return pd.DataFrame()
+
+    # Filter base set
+    matched = books[books["isbn13"].isin(isbn_candidates)]
+
+    if matched.empty:
+        print("ℹ️  No rows in CSV matched extracted ISBNs.")
+        return matched
+
+    # Category filtering
     if category and category != "All":
-        book_recs = book_recs[book_recs["simple_categories"] == category].head(final_top_k)
-    else:
-        book_recs = book_recs.head(final_top_k)
+        if "simple_categories" in matched.columns:
+            matched = matched[matched["simple_categories"] == category]
+        else:
+            print("⚠️  'simple_categories' column missing; skipping category filter.")
 
-    if tone == "Happy":
-        book_recs = book_recs.sort_values(by="joy", ascending=False)
-    elif tone == "Surprising":
-        book_recs = book_recs.sort_values(by="surprise", ascending=False)
-    elif tone == "Angry":
-        book_recs = book_recs.sort_values(by="anger", ascending=False)
-    elif tone == "Suspenseful":
-        book_recs = book_recs.sort_values(by="fear", ascending=False)
-    elif tone == "Sad":
-        book_recs = book_recs.sort_values(by="sadness", ascending=False)
+    if matched.empty:
+        return matched.head(final_top_k)
 
-    return book_recs
+    # Tone sorting
+    if tone and tone in TONE_COLUMN_MAP:
+        tone_col = TONE_COLUMN_MAP[tone]
+        if tone_col in matched.columns:
+            matched = matched.sort_values(by=tone_col, ascending=False)
+        else:
+            print(f"⚠️  Tone column '{tone_col}' not found; skipping tone sort.")
+
+    # Limit final size
+    return matched.head(final_top_k)
 
 
-# --- API Endpoint ---
+# ------------------------------------------------------------------
+# API Endpoint
+# ------------------------------------------------------------------
 @app.post("/recommend")
 def recommend_books(req: RecommendationRequest):
-    print(f"Received: {req}")
+    print(f"➡️  Received request: query='{req.query}' category='{req.category}' tone='{req.tone}'")
     try:
-        recommendations = retrieve_semantic_recommendations(req.query, req.category, req.tone)
+        df = retrieve_semantic_recommendations(req.query, req.category, req.tone)
         results = []
 
-        for i, (_, row) in enumerate(recommendations.iterrows(), start=1):
-            description = row["description"]
-            truncated = " ".join(description.split()[:30]) + "..."
-
-            authors_split = row["authors"].split(";")
-            if len(authors_split) == 2:
-                authors_str = f"{authors_split[0]} and {authors_split[1]}"
-            elif len(authors_split) > 2:
-                authors_str = f"{', '.join(authors_split[:-1])}, and {authors_split[-1]}"
-            else:
-                authors_str = row["authors"]
-
+        for i, (_, row) in enumerate(df.iterrows(), start=1):
             results.append({
                 "_id": str(i),
-                "title": row["title"],
-                "authors": authors_str,
-                "description": truncated,
-                "large_thumbnail": row["large_thumbnail"],
-                "info_link": row.get("info_link", "")
+                "title": row.get("title", "Unknown Title"),
+                "authors": format_authors(row.get("authors", "")),
+                "description": truncate_text(row.get("description", "") or ""),
+                "large_thumbnail": row.get("large_thumbnail", FALLBACK_THUMB),
+                "info_link": row.get("info_link", ""),
+                "isbn13": row.get("isbn13", "")
             })
 
+        print(f"✅ Returning {len(results)} recommendation(s).")
         return {"recommendations": results}
 
     except Exception as e:
+        print(f"❌ Error in /recommend: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ✅ Add this route to fix 404 on "/"
+# ------------------------------------------------------------------
+# Root Route
+# ------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"message": "📚 Book Recommender API is running!"}
+    return {"message": "📚 Book Recommender API is running!", "collection_count": collection_count}
