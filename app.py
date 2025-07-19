@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from langchain.vectorstores import Chroma
 from langchain.embeddings import OpenAIEmbeddings
+import numpy as np
 
 # Load environment variables (e.g., for OpenAI API key)
 load_dotenv()
@@ -29,7 +30,7 @@ books = pd.read_csv("books_with_emotions.csv")  # CSV must be in repo
 books["large_thumbnail"] = books["thumbnail"] + "&fife=w800"
 books["large_thumbnail"] = np.where(
     books["large_thumbnail"].isna(),
-    "C:\\Users\\palde\\cover-not-found.jpg",
+    "cover-not-found.jpg",
     books["large_thumbnail"],
 )
 print(f"Books dataset loaded with {len(books)} entries.")
