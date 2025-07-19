@@ -82,7 +82,7 @@ def recommend_books(req: RecommendationRequest):
         recommendations = retrieve_semantic_recommendations(req.query, req.category, req.tone)
         results = []
 
-        for _, row in recommendations.iterrows():
+        for i, (_, row) in enumerate(recommendations.iterrows(), start=1):
             description = row["description"]
             truncated = " ".join(description.split()[:30]) + "..."
 
@@ -95,6 +95,7 @@ def recommend_books(req: RecommendationRequest):
                 authors_str = row["authors"]
 
             results.append({
+                "_id": str(i),
                 "title": row["title"],
                 "authors": authors_str,
                 "description": truncated,
