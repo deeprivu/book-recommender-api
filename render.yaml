@@ -5,6 +5,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: streamlit run app.py --server.port $PORT
     envVars:
-      - key: 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
+      - key: OPENAI_API_KEY
         sync: false
     plan: free
