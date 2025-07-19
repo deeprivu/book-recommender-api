@@ -27,8 +27,6 @@ app.add_middleware(
 PERSIST_DIRECTORY = os.path.join(os.getcwd(), "chroma_db")
 books = pd.read_csv("books_with_emotions.csv")  # CSV must be in repo
 print(f"Books dataset loaded with {len(books)} entries.")
-if not os.path.exists(PERSIST_DIRECTORY):
-    raise FileNotFoundError(f"Chroma DB directory does not exist: {PERSIST_DIRECTORY}")
 
 # Load the Chroma DB
 db_books = Chroma(
